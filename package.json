@@ -1,0 +1,21 @@
+{
+  "name": "crypto-trading-bot",
+  "version": "2.0.0",
+  "description": "Modular crypto trading bot with backtesting, paper trading, and live trading capabilities",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "backtest": "node src/index.js --mode backtest",
+    "paper": "node src/index.js --mode paper",
+    "live": "node src/index.js --mode live",
+    "compare": "node src/index.js --mode compare"
+  },
+  "keywords": ["crypto", "trading", "binance", "backtest", "algorithmic-trading"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {}
+}

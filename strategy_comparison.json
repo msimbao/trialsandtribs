@@ -1,0 +1,52 @@
+[
+  {
+    "Strategy": "mean_reversion",
+    "Return %": "NaN",
+    "Trades": 128,
+    "Win Rate %": "45.3",
+    "protectedCapital": "32.8%",
+    "Sharpe": "0.15",
+    "Max DD %": "-7.60",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "momentum",
+    "Return %": "NaN",
+    "Trades": 208,
+    "Win Rate %": "50.0",
+    "protectedCapital": "38.9%",
+    "Sharpe": "0.08",
+    "Max DD %": "-10.38",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "pullback",
+    "Return %": "NaN",
+    "Trades": 214,
+    "Win Rate %": "43.5",
+    "protectedCapital": "29.9%",
+    "Sharpe": "-0.08",
+    "Max DD %": "-15.78",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "bear_market",
+    "Return %": "NaN",
+    "Trades": 310,
+    "Win Rate %": "47.1",
+    "protectedCapital": "34.8%",
+    "Sharpe": "0.07",
+    "Max DD %": "-18.35",
+    "Liquidations": 0
+  },
+  {
+    "Strategy": "adaptive",
+    "Return %": "NaN",
+    "Trades": 347,
+    "Win Rate %": "45.0",
+    "protectedCapital": "32.9%",
+    "Sharpe": "0.22",
+    "Max DD %": "-15.25",
+    "Liquidations": 0
+  }
+]
