@@ -1,4 +1,6 @@
 const Stats = require('../utils/stats');
+const BinanceFetcher = require('../core/binanceFetcher');
+
 
 class TradingBacktest {
   constructor(initialCap = 10000, lev = 1, makerFee = 0.0002, takerFee = 0.0004) {
