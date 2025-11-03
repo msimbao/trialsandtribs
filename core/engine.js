@@ -17,15 +17,15 @@ class TradingBacktest {
     
     // DYNAMIC PROFIT PROTECTION SYSTEM
     // Two-tier trailing stops: wide pre-profit (2 ATR), tight post-profit (1→0.5 ATR)
-    this.profitThresholdATR = 0.5; // Switch to profit protection after 0.5 ATR gain
-    this.initialStopATR = 2.0; // Wide stop before profit (avoid noise)
-    this.profitTrailingATR = 1.0; // Base trailing once profitable
+    this.profitThresholdATR = 0.2; // Switch to profit protection after 0.5 ATR gain
+    this.initialStopATR = 1.2; // Wide stop before profit (avoid noise)
+    this.profitTrailingATR = 0.4; // Base trailing once profitable
     
     // Progressive tightening tiers based on profit level
     this.profitTiers = [
-      { profitATR: 0.5, trailATR: 1.0 },   // Small profit: moderate protection
-      { profitATR: 1.5, trailATR: 0.75 },  // Good profit: tighter protection
-      { profitATR: 3.0, trailATR: 0.5 }    // Great profit: very tight protection
+      { profitATR: 1.0, trailATR: 0.2 },   // Small profit: moderate protection
+      { profitATR: 2.0, trailATR: 0.5 },  // Good profit: tighter protection
+      { profitATR: 3.0, trailATR: 1.0 }    // Great profit: very tight protection
     ];
     
     // Regime-specific stop adjustments (subtle)
@@ -179,6 +179,14 @@ class TradingBacktest {
         long = bullLong || bearLong || rangeLong;
         short = bearShort || rangeShort;
       }
+
+      
+
+      const atrMA = i >= 50 ? Stats.mean(atr.slice(i - 50, i)) : atr[i];
+const isVolatileEnough = atr[i] > atrMA * 0.8; // Only trade when ATR > 80% of average
+
+long = long && isVolatileEnough;
+short = short && isVolatileEnough;
 
       return { long, short, atr: atr[i], rsi: rsi[i], ema20: ema20[i], ema50: ema50[i], ema200: ema200[i], regime: regimes[i] };
     });
@@ -350,6 +358,44 @@ class TradingBacktest {
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
+    // Add periodic status logging
+const LOG_INTERVAL_MINUTES = 5; // Change this to your desired interval
+const statusLogger = setInterval(() => {
+  if (position !== 0) {
+    const currentPrice = data[data.length - 1].close;
+    const currentAtr = signals[signals.length - 1].atr;
+    const hoursHeld = (Date.now() - entryTime.getTime()) / 3600000;
+    
+    // Calculate current P&L
+    const grossPnl = position === 1
+      ? (currentPrice - entryPrice) * positionQty * this.leverage
+      : (entryPrice - currentPrice) * positionQty * this.leverage;
+    
+    const exitFee = currentPrice * positionQty * this.leverage * this.takerFee;
+    const fundingCost = this.calcFundingCost(currentPrice * positionQty * this.leverage, hoursHeld);
+    const netPnl = grossPnl - exitFee - fundingCost;
+    const projectedCapital = capital + netPnl;
+    const profitInATR = (position === 1 ? currentPrice - entryPrice : entryPrice - currentPrice) / currentAtr;
+    
+    console.log('\n' + '─'.repeat(70));
+    console.log(`⏰ PERIODIC STATUS UPDATE [${new Date().toLocaleString()}]`);
+    console.log('─'.repeat(70));
+    console.log(`Position: ${position === 1 ? 'LONG' : 'SHORT'} ${this.leverage}x at ${entryPrice.toFixed(2)}`);
+    console.log(`Current Price: ${currentPrice.toFixed(2)} | Trailing Stop: ${trailingStop.toFixed(2)}`);
+    console.log(`Profit: ${profitInATR.toFixed(2)} ATR (Max: ${maxProfitATR.toFixed(2)} ATR)`);
+    console.log(`\nIF CLOSED NOW:`);
+    console.log(`  Gross P&L: $${grossPnl.toFixed(2)}`);
+    console.log(`  Exit Fee: -$${exitFee.toFixed(2)}`);
+    console.log(`  Funding Cost: -$${fundingCost.toFixed(2)}`);
+    console.log(`  Net P&L: $${netPnl.toFixed(2)} (${(netPnl/(entryPrice*positionQty)*100).toFixed(2)}%)`);
+    console.log(`  Final Capital: $${projectedCapital.toFixed(2)}`);
+    console.log(`  Total Return: ${((projectedCapital - this.initialCapital) / this.initialCapital * 100).toFixed(2)}%`);
+    console.log('─'.repeat(70));
+  } else {
+    console.log(`\n⏰ [${new Date().toLocaleString()}] No position open | Capital: $${capital.toFixed(2)}`);
+  }
+}, LOG_INTERVAL_MINUTES * 60 * 1000);
+
 
     let lastClosedTime = null;
 

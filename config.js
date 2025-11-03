@@ -3,7 +3,7 @@
    FORWARD_TEST : true, // true = paper trading, false = backtest
    SYMBOL : 'NEARUSDT',
    INTERVAL : '1h',
-   INITIAL_CAPITAL : 890,
+   INITIAL_CAPITAL : 800,
    LEVERAGE : 1,
    STRATEGY_MODE : 'adaptive', // adaptive, momentum, mean_reversion, pullback, bear_market
    USE_REGIME_PARAMS : true,
