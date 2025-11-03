@@ -1,6 +1,6 @@
 const Stats = require('../utils/stats');
 const BinanceFetcher = require('../core/binanceFetcher');
-
+const WebSocket = require('ws');
 
 class TradingBacktest {
   constructor(initialCap = 10000, lev = 1, makerFee = 0.0002, takerFee = 0.0004) {
@@ -327,9 +327,20 @@ short = short && isVolatileEnough;
 
     const shutdown = async () => {
       console.log('\n' + '='.repeat(70) + '\n⚠️  SHUTDOWN - CLOSING POSITIONS\n' + '='.repeat(70));
-      if (position !== 0) {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+  if (ws) {
+    ws.removeAllListeners(); // Prevent reconnection on manual close
+    ws.close();
+  }
+  if (statusLogger) {
+    clearInterval(statusLogger);
+  }
+  
+  if (position !== 0) {
+    const exitPrice = livePrice || data[data.length - 1].close;
         const data = await fetcher.getLatestCandles(symbol, interval, 10);
-        const exitPrice = data.slice(0, -1)[data.length - 2].close;
         const exitTime = data.slice(0, -1)[data.length - 2].timestamp;
         const hoursHeld = (Date.now() - entryTime.getTime()) / 3600000;
         const pnl = position === 1 ? (exitPrice - entryPrice) * positionQty * this.leverage
@@ -358,15 +369,83 @@ short = short && isVolatileEnough;
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-    // Add periodic status logging
-const LOG_INTERVAL_MINUTES = 5; // Change this to your desired interval
+
+    let lastClosedTime = null;
+
+// Real-time price tracking via WebSocket with auto-reconnect
+let latestAtr = null;
+let livePrice = null;
+let wsConnected = false;
+let ws = null;
+let reconnectTimeout = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 30000; // Max 30 seconds between reconnects
+
+const connectWebSocket = () => {
+  const symbolFormatted = symbol.toLowerCase();
+  const wsUrl = `wss://fstream.binance.com/ws/${symbolFormatted}@trade`;
+  
+  // Clear any existing connection
+  if (ws) {
+    ws.removeAllListeners();
+    ws.close();
+  }
+  
+  ws = new WebSocket(wsUrl);
+  
+  ws.on('open', () => {
+    console.log(`📡 WebSocket connected to ${symbol} live prices`);
+    wsConnected = true;
+    reconnectAttempts = 0; // Reset reconnect counter on success
+  });
+  
+  ws.on('message', (data) => {
+    const trade = JSON.parse(data);
+    livePrice = parseFloat(trade.p);
+  });
+  
+  ws.on('error', (error) => {
+    console.error(`❌ WebSocket error: ${error.message}`);
+    wsConnected = false;
+  });
+  
+  ws.on('close', (code, reason) => {
+    wsConnected = false;
+    reconnectAttempts++;
+    
+    // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, up to 30s
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
+    
+    console.log(`🔌 WebSocket closed (code: ${code}). Reconnecting in ${delay/1000}s... (attempt ${reconnectAttempts})`);
+    
+    // Schedule reconnection
+    reconnectTimeout = setTimeout(() => {
+      console.log(`🔄 Attempting to reconnect WebSocket...`);
+      connectWebSocket();
+    }, delay);
+  });
+  
+  // Binance WebSocket streams close after 24 hours, so proactively reconnect every 23 hours
+  setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      console.log('🔄 Proactive reconnect (24h limit approaching)...');
+      ws.close();
+    }
+  }, 23 * 60 * 60 * 1000); // 23 hours
+};
+
+
+// Initial connection
+connectWebSocket();
+
+const LOG_INTERVAL_MINUTES = 1;
 const statusLogger = setInterval(() => {
-  if (position !== 0) {
-    const currentPrice = data[data.length - 1].close;
-    const currentAtr = signals[signals.length - 1].atr;
+  if (position !== 0 && livePrice && latestAtr) {
+    const currentPrice = livePrice;
+    const currentAtr = latestAtr; // Use stored ATR
     const hoursHeld = (Date.now() - entryTime.getTime()) / 3600000;
     
-    // Calculate current P&L
+    // Calculate current P&L with live price
     const grossPnl = position === 1
       ? (currentPrice - entryPrice) * positionQty * this.leverage
       : (entryPrice - currentPrice) * positionQty * this.leverage;
@@ -378,26 +457,24 @@ const statusLogger = setInterval(() => {
     const profitInATR = (position === 1 ? currentPrice - entryPrice : entryPrice - currentPrice) / currentAtr;
     
     console.log('\n' + '─'.repeat(70));
-    console.log(`⏰ PERIODIC STATUS UPDATE [${new Date().toLocaleString()}]`);
+    console.log(`⏰ LIVE STATUS UPDATE [${new Date().toLocaleString()}]`);
     console.log('─'.repeat(70));
     console.log(`Position: ${position === 1 ? 'LONG' : 'SHORT'} ${this.leverage}x at ${entryPrice.toFixed(2)}`);
-    console.log(`Current Price: ${currentPrice.toFixed(2)} | Trailing Stop: ${trailingStop.toFixed(2)}`);
+    console.log(`Live Price: ${currentPrice.toFixed(2)} 📡 | Stop: ${trailingStop.toFixed(2)} | Liq: ${liquidationPrice.toFixed(2)}`);
     console.log(`Profit: ${profitInATR.toFixed(2)} ATR (Max: ${maxProfitATR.toFixed(2)} ATR)`);
     console.log(`\nIF CLOSED NOW:`);
-    console.log(`  Gross P&L: $${grossPnl.toFixed(2)}`);
+    console.log(`  Gross P&L: $${grossPnl.toFixed(2)} (${(grossPnl/(entryPrice*positionQty)*100).toFixed(2)}%)`);
     console.log(`  Exit Fee: -$${exitFee.toFixed(2)}`);
     console.log(`  Funding Cost: -$${fundingCost.toFixed(2)}`);
     console.log(`  Net P&L: $${netPnl.toFixed(2)} (${(netPnl/(entryPrice*positionQty)*100).toFixed(2)}%)`);
     console.log(`  Final Capital: $${projectedCapital.toFixed(2)}`);
     console.log(`  Total Return: ${((projectedCapital - this.initialCapital) / this.initialCapital * 100).toFixed(2)}%`);
     console.log('─'.repeat(70));
-  } else {
-    console.log(`\n⏰ [${new Date().toLocaleString()}] No position open | Capital: $${capital.toFixed(2)}`);
+  } else if (position === 0) {
+    const currentReturn = ((capital - this.initialCapital) / this.initialCapital * 100).toFixed(2);
+    console.log(`\n⏰ [${new Date().toLocaleString()}] No position | Capital: $${capital.toFixed(2)} (${currentReturn}%) ${wsConnected ? '📡' : '❌'}`);
   }
 }, LOG_INTERVAL_MINUTES * 60 * 1000);
-
-
-    let lastClosedTime = null;
 
     while (true) {
       try {
@@ -419,6 +496,8 @@ const statusLogger = setInterval(() => {
         const signals = this.generateSignals(data, strategyMode);
         const signal = signals[signals.length - 1];
         const curPrice = latest.close, curTime = latest.timestamp, curAtr = signal.atr;
+        latestAtr = curAtr; // Store for statusLogger
+
         if (isNaN(curAtr)) { await new Promise(r => setTimeout(r, updateInterval * 1000)); continue; }
 
         const regime = signal.regime.bull ? 'BULL' : signal.regime.bear ? 'BEAR' : 'RANGE';

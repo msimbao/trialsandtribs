@@ -10,12 +10,18 @@
     "live": "node src/index.js --mode live",
     "compare": "node src/index.js --mode compare"
   },
-  "keywords": ["crypto", "trading", "binance", "backtest", "algorithmic-trading"],
+  "keywords": [
+    "crypto",
+    "trading",
+    "binance",
+    "backtest",
+    "algorithmic-trading"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
-    "dotenv": "^16.3.1"
-  },
-  "devDependencies": {}
+    "dotenv": "^16.3.1",
+    "ws": "^8.18.3"
+  }
 }
