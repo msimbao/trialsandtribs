@@ -186,17 +186,23 @@ async function evaluatePair(pair) {
 
   const spread             = calculator.spread(perpData.price, spotData.price);
   const annualizedFunding  = fundingAvg * 24 * 365 * 100;
-
-  // Tier-aware spread limit — Tier 3 coins have naturally wider spreads
   const tier               = getTier(pair);
-  const maxSpread          = tier === 1 ? 0.003 : tier === 2 ? 0.005 : 0.012; // 0.3% / 0.5% / 1.2%
 
-  if (annualizedFunding < config.MIN_FUNDING_RATE_PCT) {
-    logger.warn('EVAL', `${pair} | SKIP: 7d avg funding ${annualizedFunding.toFixed(2)}% < ${config.MIN_FUNDING_RATE_PCT}% threshold`);
+  // Tier-aware thresholds — all sourced from config
+  const minRate   = tier === 1 ? config.MIN_RATE_T1 : tier === 2 ? config.MIN_RATE_T2 : config.MIN_RATE_T3;
+  const maxSpread = tier === 1 ? 0.003 : tier === 2 ? 0.005 : 0.012;
+  const minVol    = tier === 1 ? config.MIN_VOL_T1  : tier === 2 ? config.MIN_VOL_T2  : config.MIN_VOL_T3;
+
+  if (annualizedFunding < minRate) {
+    logger.warn('EVAL', `${pair} | SKIP: ${annualizedFunding.toFixed(2)}%/y < ${minRate}% min (T${tier})`);
+    return null;
+  }
+  if (annualizedFunding > config.MAX_RATE) {
+    logger.warn('EVAL', `${pair} | SKIP: ${annualizedFunding.toFixed(0)}%/y > ${config.MAX_RATE}% cap (manipulation risk)`);
     return null;
   }
   if (Math.abs(spread) > maxSpread) {
-    logger.warn('EVAL', `${pair} | SKIP: spread ${(spread*100).toFixed(4)}% > max ${(maxSpread*100).toFixed(2)}% for Tier ${tier}`);
+    logger.warn('EVAL', `${pair} | SKIP: spread ${(spread*100).toFixed(4)}% > ${(maxSpread*100).toFixed(2)}% max (T${tier})`);
     return null;
   }
 

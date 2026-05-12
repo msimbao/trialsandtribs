@@ -15,8 +15,20 @@ module.exports = {
   TAKER_FEE:  0.0004,      // 0.04%
 
   // ── Entry filters ─────────────────────────────────────────────────────────
-  MIN_FUNDING_RATE_PCT: 5,     // TEMP: lowered to confirm bot is working — raise to 15 for real trading
-  MAX_SPREAD_PCT:       0.5,   // Max abs spread between perp and spot (%)
+  MIN_FUNDING_RATE_PCT: 5,      // Global pre-filter — tier thresholds applied in evaluatePair
+
+  // Tier-aware rate minimums (annualized %)
+  MIN_RATE_T1: 10,   // BTC, ETH
+  MIN_RATE_T2: 15,   // BNB, SOL, XRP etc
+  MIN_RATE_T3: 20,   // everything else — sized for $2000 trades
+
+  // Tier-aware volume minimums (24h USD)
+  MIN_VOL_T1:  0,        // BTC/ETH always liquid
+  MIN_VOL_T2:  50e6,     // $50M/day
+  MIN_VOL_T3:  1e6,      // $5M/day — plenty for $2000 position
+
+  // Manipulation cap
+  MAX_RATE:    150,       // ignore anything above 150% annualized
 
   // ── Exit conditions ───────────────────────────────────────────────────────
   EXIT_RATE_THRESHOLD_PCT:     5,     // Exit if annualized rate drops below (%)
