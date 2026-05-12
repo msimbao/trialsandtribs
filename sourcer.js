@@ -79,7 +79,7 @@ async function getCurrentFundingRate(pair) {
 
 // ─── Rolling N-day average funding rate ──────────────────────────────────────
 // Binance provides 8h funding intervals → 3 per day → days * 3 entries
-async function getRollingFundingRate(pair, days = 30) {
+async function getRollingFundingRate(pair, days = 7) {
   try {
     const symbol = `${pair}USDT`;
     const limit  = Math.min(days * 3, 1000);
@@ -90,8 +90,14 @@ async function getRollingFundingRate(pair, days = 30) {
 
     if (!Array.isArray(data) || data.length === 0) return null;
 
+    // Require at least 3 days of data — skip brand new coins
+    const minRequired = 3 * 3; // 3 days × 3 payments/day
+    if (data.length < minRequired) {
+      logger.warn('SOURCER', `${pair} has only ${data.length} funding history entries — skipping (too new)`);
+      return null;
+    }
+
     const sum = data.reduce((acc, d) => acc + parseFloat(d.fundingRate), 0);
-    // Convert from 8h rate to 1h rate for compatibility with rest of system
     return (sum / data.length) / 8;
   } catch (err) {
     logger.error('SOURCER', `getRollingFundingRate ${pair}: ${err.message}`);

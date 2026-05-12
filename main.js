@@ -176,7 +176,7 @@ async function evaluatePair(pair) {
   const [perpData, spotData, fundingAvg] = await Promise.all([
     sourcer.getPerpPrice(pair),
     sourcer.getSpotPrice(pair),
-    sourcer.getRollingFundingRate(pair, 30), // 30-day average
+    sourcer.getRollingFundingRate(pair, 7),  // 7-day rolling average (reacts faster)
   ]);
 
   if (!perpData || !spotData || fundingAvg === null) {
