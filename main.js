@@ -176,37 +176,44 @@ async function evaluatePair(pair) {
   const [perpData, spotData, fundingAvg] = await Promise.all([
     sourcer.getPerpPrice(pair),
     sourcer.getSpotPrice(pair),
-    sourcer.getRollingFundingRate(pair, 7),  // 7-day rolling average (reacts faster)
+    sourcer.getRollingFundingRate(pair, 7),
   ]);
 
   if (!perpData || !spotData || fundingAvg === null) {
-    logger.warn('EVAL', `Incomplete data for ${pair}, skipping`);
+    logger.warn('EVAL', `${pair} | SKIP: incomplete data (perp=${!!perpData} spot=${!!spotData} funding=${fundingAvg})`);
     return null;
   }
 
-  const spread        = calculator.spread(perpData.price, spotData.price);
-  const profit        = calculator.profit(config.TRADE_AMOUNT, fundingAvg, config.TAKER_FEE, spread, config.LEVERAGE);
+  const spread             = calculator.spread(perpData.price, spotData.price);
+  const annualizedFunding  = fundingAvg * 24 * 365 * 100;
+
+  // Tier-aware spread limit — Tier 3 coins have naturally wider spreads
+  const tier               = getTier(pair);
+  const maxSpread          = tier === 1 ? 0.003 : tier === 2 ? 0.005 : 0.012; // 0.3% / 0.5% / 1.2%
+
+  if (annualizedFunding < config.MIN_FUNDING_RATE_PCT) {
+    logger.warn('EVAL', `${pair} | SKIP: 7d avg funding ${annualizedFunding.toFixed(2)}% < ${config.MIN_FUNDING_RATE_PCT}% threshold`);
+    return null;
+  }
+  if (Math.abs(spread) > maxSpread) {
+    logger.warn('EVAL', `${pair} | SKIP: spread ${(spread*100).toFixed(4)}% > max ${(maxSpread*100).toFixed(2)}% for Tier ${tier}`);
+    return null;
+  }
+
+  const profit         = calculator.profit(config.TRADE_AMOUNT, fundingAvg, config.TAKER_FEE, spread, config.LEVERAGE);
   const effectiveRateY = calculator.effectiveRate(profit, config.TRADE_AMOUNT);
-  const annualizedFunding = fundingAvg * 24 * 365 * 100;
 
-  // Filter: only take if annualized funding > threshold AND spread not too wide
-  if (annualizedFunding < config.MIN_FUNDING_RATE_PCT) return null;
-  if (Math.abs(spread) > config.MAX_SPREAD_PCT / 100) return null;
+  logger.info('EVAL', `${pair} | ✅ Funding: ${annualizedFunding.toFixed(2)}%/y | Spread: ${(spread*100).toFixed(4)}% | Profit: $${profit.toFixed(2)}`);
 
-  logger.info('EVAL', `${pair} | Funding: ${annualizedFunding.toFixed(2)}%/y | Spread: ${(spread*100).toFixed(4)}% | Profit: $${profit.toFixed(2)}`);
+  return { pair, perpPrice: perpData.price, spotPrice: spotData.price, spread, fundingRate: fundingAvg,
+           fundingRateH: fundingAvg, annualizedFunding, profit, effectiveRateY, tier, timestamp: Date.now() };
+}
 
-  return {
-    pair,
-    perpPrice: perpData.price,
-    spotPrice: spotData.price,
-    spread,
-    fundingRate: fundingAvg,
-    fundingRateH: fundingAvg,
-    annualizedFunding,
-    profit,
-    effectiveRateY,
-    timestamp: Date.now(),
-  };
+// ─── Tier helper (mirrors snapshot.js) ───────────────────────────────────────
+function getTier(pair) {
+  const T1 = new Set(['BTC', 'ETH']);
+  const T2 = new Set(['BNB', 'SOL', 'XRP', 'MATIC', 'AVAX', 'LINK', 'LTC', 'DOT']);
+  return T1.has(pair) ? 1 : T2.has(pair) ? 2 : 3;
 }
 
 // ─── Open a paper position ───────────────────────────────────────────────────
@@ -352,7 +359,8 @@ async function sendHourlyStatus(totalScanned, opportunities) {
       lines.push(`${(o.pair + held).padEnd(8)} ${o.annualizedFunding.toFixed(2).padEnd(10)} ${(o.spread * 100).toFixed(4).padEnd(10)} $${o.profit.toFixed(2)}`);
     }
   } else {
-    lines.push(`⏳ No pairs above ${config.MIN_FUNDING_RATE_PCT}%/yr threshold right now`);
+    lines.push(`⏳ ${candidates.length} pairs above ${config.MIN_FUNDING_RATE_PCT}%/yr found but all filtered`);
+    lines.push(`   Check logs for EVAL SKIP reasons (spread too wide is most common)`);
     lines.push(`   Market may be bearish/neutral — watching and waiting`);
   }
 
