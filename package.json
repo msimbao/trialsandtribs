@@ -1,27 +1,16 @@
 {
-  "name": "crypto-trading-bot",
-  "version": "2.0.0",
-  "description": "Modular crypto trading bot with backtesting, paper trading, and live trading capabilities",
-  "main": "src/index.js",
+  "name": "cash-carry-arbitrage-bot",
+  "version": "1.0.0",
+  "description": "Cash-and-carry arbitrage bot: spot long + perp short to capture funding rates on Binance",
+  "main": "src/main.js",
   "scripts": {
-    "start": "node src/index.js",
-    "backtest": "node src/index.js --mode backtest",
-    "paper": "node src/index.js --mode paper",
-    "live": "node src/index.js --mode live",
-    "compare": "node src/index.js --mode compare"
+    "start": "node src/main.js",
+    "dev": "LOG_LEVEL=DEBUG node src/main.js"
   },
-  "keywords": [
-    "crypto",
-    "trading",
-    "binance",
-    "backtest",
-    "algorithmic-trading"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {
-    "axios": "^1.6.0",
-    "dotenv": "^16.3.1",
-    "ws": "^8.18.3"
-  }
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {},
+  "keywords": ["arbitrage", "crypto", "binance", "funding-rate", "paper-trading"],
+  "license": "MIT"
 }
