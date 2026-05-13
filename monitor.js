@@ -156,14 +156,26 @@ function handleStreamMessage(raw) {
 // ─── REST fallback to fill in spot prices ─────────────────────────────────────
 async function restFallbackPoll() {
   const sourcer = require('./sourcer');
-  for (const pair of config.PAIRS) {
+  const pairs   = require('./pairs');
+
+  // Build combined list: funding pairs + pairs trading coins
+  const allCoins = new Set([
+    ...config.PAIRS,
+    ...config.PAIRS_CONFIG.relationships.flatMap(r => r),
+  ]);
+
+  for (const pair of allCoins) {
     try {
       const spot = await sourcer.getSpotPrice(pair);
-      if (spot) {
-        if (!snapshot[pair]) snapshot[pair] = {};
-        snapshot[pair].spotPrice = spot.price;
-        if (snapshot[pair].perpPrice) emitTick(pair);
-      }
+      if (!spot) continue;
+
+      // Update snapshot for funding rate positions
+      if (!snapshot[pair]) snapshot[pair] = {};
+      snapshot[pair].spotPrice = spot.price;
+      if (snapshot[pair].perpPrice) emitTick(pair);
+
+      // Feed spot price into pairs engine
+      pairs.onPrice(pair, spot.price);
     } catch (_) {}
   }
 }

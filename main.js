@@ -14,6 +14,7 @@ const discord    = require('./discord');
 const logger     = require('./logger');
 const state      = require('./state');
 const config     = require('./config');
+const pairs      = require('./pairs');
 
 let isRunning = false;
 
@@ -76,32 +77,59 @@ async function boot() {
   // Also run hourly full scan as backup
   setInterval(fullScan, config.SCAN_INTERVAL_MS);
   await fullScan();
+
+  // Pairs trading — 30-minute Discord status update
+  setInterval(sendPairsStatus, config.PAIRS_CONFIG.STATUS_INTERVAL_MS);
+  logger.info('BOT', `📐 Pairs trading active — monitoring ${config.PAIRS_CONFIG.relationships.length} relationships`);
 }
 
 // ─── Real-time tick handler (called by WebSocket monitor) ────────────────────
 async function onTick(data) {
   // data = { pair, perpPrice, spotPrice, fundingRate, spread }
-  const openPositions = state.get('positions');
 
+  // ── Feed price into pairs engine ────────────────────────────────────────────
+  pairs.onPrice(data.pair, data.spotPrice);
+
+  // ── Check exits on open pairs positions ────────────────────────────────────
+  const openPositions = state.get('positions');
   for (const pos of openPositions) {
+    if (pos.type !== 'pairs') continue;
+    const exit = pairs.checkExit(pos);
+    if (exit) await closePairsPosition(pos, exit.reason, exit.zScore);
+  }
+
+  // ── Check exits on funding positions ───────────────────────────────────────
+  for (const pos of openPositions) {
+    if (pos.type !== 'funding') continue;
     if (pos.pair !== data.pair) continue;
 
-    const spreadPct = data.spread * 100;
     const annualizedRate = data.fundingRate * 24 * 365 * 100;
-
-    // ── Exit conditions ──────────────────────────────────────────────────────
-    const spreadInverted   = data.spread < -config.SPREAD_INVERSION_THRESHOLD;
-    const rateTooLow       = annualizedRate < config.EXIT_RATE_THRESHOLD_PCT;
-    const hitMaxDrawdown   = tracker.drawdown(pos, data.perpPrice, data.spotPrice) > config.MAX_DRAWDOWN_PCT;
-    const hitTakeProfit    = tracker.unrealizedPnl(pos, data.perpPrice, data.spotPrice) >= config.TAKE_PROFIT_USD;
+    const spreadInverted = data.spread < -config.SPREAD_INVERSION_THRESHOLD;
+    const rateTooLow     = annualizedRate < config.EXIT_RATE_THRESHOLD_PCT;
+    const hitMaxDrawdown = tracker.drawdown(pos, data.perpPrice, data.spotPrice) > config.MAX_DRAWDOWN_PCT;
+    const hitTakeProfit  = tracker.unrealizedPnl(pos, data.perpPrice, data.spotPrice) >= config.TAKE_PROFIT_USD;
 
     if (spreadInverted || rateTooLow || hitMaxDrawdown || hitTakeProfit) {
       const reason = spreadInverted ? 'SPREAD_INVERTED'
                    : rateTooLow     ? 'RATE_TOO_LOW'
                    : hitMaxDrawdown ? 'MAX_DRAWDOWN'
                    :                  'TAKE_PROFIT';
-
       await closePosition(pos, data, reason);
+    }
+  }
+
+  // ── Scan for new pairs opportunities on every tick ──────────────────────────
+  const slotsOpen = config.MAX_POSITIONS - state.get('positions').length;
+  if (slotsOpen > 0) {
+    const opportunities = pairs.scanForOpportunities();
+    for (const opp of opportunities) {
+      if (state.get('positions').length >= config.MAX_POSITIONS) break;
+      // Don't double-enter same relationship
+      const alreadyOpen = state.get('positions').some(p => p.type === 'pairs' && p.key === opp.key);
+      if (!alreadyOpen && state.get('balance') >= config.TRADE_AMOUNT) {
+        await openPairsPosition(opp);
+        break; // one new position per tick max
+      }
     }
   }
 }
@@ -228,6 +256,7 @@ async function openPosition(opportunity) {
 
   const position = {
     id: `${pair}-${Date.now()}`,
+    type: 'funding',
     pair,
     entryPerpPrice: perpPrice,
     entrySpotPrice: spotPrice,
@@ -404,6 +433,125 @@ async function sendDailySummary() {
   if (positions.length > 0) {
     await discord.send(buildPositionsBlock(positions, []));
   }
+}
+
+// ─── Open a pairs position ────────────────────────────────────────────────────
+async function openPairsPosition(opp) {
+  const { key, coinA, coinB, shortCoin, longCoin, zScore, divergence, currentRatio, mean, std } = opp;
+  const halfAmount = config.TRADE_AMOUNT / 2;
+  const entryFee   = config.TRADE_AMOUNT * 2 * config.TAKER_FEE;
+
+  const position = {
+    id:              `pairs-${key}-${Date.now()}`,
+    type:            'pairs',
+    key,
+    coinA, coinB,
+    shortCoin,
+    longCoin,
+    entryZScore:     zScore,
+    entryRatio:      currentRatio,
+    entryMean:       mean,
+    entryStd:        std,
+    entryShortPrice: pairs.latestPrice[shortCoin],
+    entryLongPrice:  pairs.latestPrice[longCoin],
+    amount:          config.TRADE_AMOUNT,
+    entryFee,
+    openedAt:        Date.now(),
+    fundingCollected: 0, // pairs positions don't collect funding
+  };
+
+  const newBalance = state.get('balance') - entryFee;
+  state.set('balance', newBalance);
+  const positions = state.get('positions');
+  positions.push(position);
+  state.set('positions', positions);
+  await state.save();
+
+  logger.info('PAIRS', `📐 Opened pairs: short ${shortCoin} / long ${longCoin} | z=${zScore.toFixed(2)} | div=${(divergence*100).toFixed(3)}%`);
+
+  await discord.send([
+    '```diff',
+    `+ PAIRS TRADE OPENED: ${shortCoin}↓ / ${longCoin}↑`,
+    `  Z-Score    : ${zScore.toFixed(3)} (entry at ±${config.PAIRS_CONFIG.ENTRY_ZSCORE})`,
+    `  Divergence : ${(divergence*100).toFixed(3)}%`,
+    `  Ratio      : ${currentRatio.toFixed(6)} (mean: ${mean.toFixed(6)})`,
+    `  Short $    : $${pairs.latestPrice[shortCoin].toFixed(4)}`,
+    `  Long  $    : $${pairs.latestPrice[longCoin].toFixed(4)}`,
+    `  Amount     : $${config.TRADE_AMOUNT} ($${halfAmount} each leg)`,
+    `  Balance    : $${newBalance.toFixed(2)}`,
+    `  Slots      : ${state.get('positions').length}/${config.MAX_POSITIONS}`,
+    '```'
+  ].join('\n'));
+}
+
+// ─── Close a pairs position ───────────────────────────────────────────────────
+async function closePairsPosition(position, reason, currentZScore) {
+  const unrealized  = pairs.unrealizedPnl(position);
+  const exitFee     = position.amount * 2 * config.TAKER_FEE;
+  const netPnl      = unrealized - exitFee;
+  const newBalance  = state.get('balance') + position.amount + netPnl;
+  const durationHrs = ((Date.now() - position.openedAt) / 3600000).toFixed(1);
+
+  state.set('balance', newBalance);
+
+  const positions = state.get('positions').filter(p => p.id !== position.id);
+  state.set('positions', positions);
+
+  const history = state.get('history');
+  history.push({ ...position, closedAt: Date.now(), exitReason: reason, netPnl, exitZScore: currentZScore });
+  state.set('history', history);
+  await state.save();
+
+  const allTimePnl = state.get('history').reduce((s, h) => s + h.netPnl, 0);
+  logger.info('PAIRS', `📐 Closed pairs ${position.key} | ${reason} | PnL: $${netPnl.toFixed(2)}`);
+
+  await discord.send([
+    `\`\`\`${netPnl >= 0 ? 'diff' : 'fix'}`,
+    `${netPnl >= 0 ? '+' : '-'} PAIRS CLOSED: ${position.shortCoin}↓/${position.longCoin}↑  [${reason}]`,
+    `  Duration     : ${durationHrs}h`,
+    `  Entry z      : ${position.entryZScore.toFixed(3)}`,
+    `  Exit z       : ${currentZScore.toFixed(3)}`,
+    `  Net PnL      : $${netPnl.toFixed(2)}`,
+    `  All-time PnL : $${allTimePnl.toFixed(2)}`,
+    `  Balance      : $${newBalance.toFixed(2)}`,
+    `  Slots        : ${positions.length}/${config.MAX_POSITIONS}`,
+    '```'
+  ].join('\n'));
+}
+
+// ─── 30-minute pairs status update ───────────────────────────────────────────
+async function sendPairsStatus() {
+  const snapshot  = pairs.getStatusSnapshot();
+  const positions = state.get('positions').filter(p => p.type === 'pairs');
+  const balance   = state.get('balance');
+
+  const lines = [
+    '```',
+    `📐 PAIRS STATUS  |  ${new Date().toUTCString()}`,
+    `Balance: $${balance.toFixed(2)}  |  Open pairs: ${positions.length}`,
+    '',
+    `${'Pair'.padEnd(12)} ${'Z-Score'.padEnd(10)} ${'Diverge'.padEnd(10)} ${'Signal'}`,
+    '─'.repeat(52),
+  ];
+
+  for (const row of snapshot) {
+    lines.push(
+      `${row.pair.padEnd(12)} ${row.zScore.toString().padEnd(10)} ${row.diverge.padEnd(10)} ${row.signal}`
+    );
+  }
+
+  if (positions.length > 0) {
+    lines.push('');
+    lines.push('OPEN PAIRS POSITIONS:');
+    for (const pos of positions) {
+      const pnl     = pairs.unrealizedPnl(pos);
+      const ageHrs  = ((Date.now() - pos.openedAt) / 3600000).toFixed(1);
+      lines.push(`  ${pos.shortCoin}↓/${pos.longCoin}↑  z-entry:${pos.entryZScore.toFixed(2)}  PnL:$${pnl.toFixed(2)}  age:${ageHrs}h`);
+    }
+  }
+
+  lines.push('```');
+  await discord.send(lines.join('\n'));
 }
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────

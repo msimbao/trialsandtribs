@@ -25,7 +25,7 @@ module.exports = {
   // Tier-aware volume minimums (24h USD)
   MIN_VOL_T1:  0,        // BTC/ETH always liquid
   MIN_VOL_T2:  50e6,     // $50M/day
-  MIN_VOL_T3:  1e6,      // $5M/day — plenty for $2000 position
+  MIN_VOL_T3:  5e6,      // $5M/day — plenty for $2000 position
 
   // Manipulation cap
   MAX_RATE:    150,       // ignore anything above 150% annualized
@@ -39,6 +39,28 @@ module.exports = {
   // ── Monitoring ────────────────────────────────────────────────────────────
   SCAN_INTERVAL_MS: 3600000,          // Full scan every 1 hour
   WS_RECONNECT_MS:  5000,             // WebSocket reconnect delay
+
+  // ── Pairs trading ─────────────────────────────────────────────────────────
+  PAIRS_CONFIG: {
+    relationships: [
+      ['BTC',   'ETH'],    // ~0.95 — L1 majors
+      ['SOL',   'AVAX'],   // ~0.91 — L1 competitors
+      ['BNB',   'OKB'],    // ~0.88 — exchange tokens
+      ['MATIC', 'ARB'],    // ~0.87 — L2 tokens
+      ['LINK',  'BAND'],   // ~0.85 — oracle tokens
+      ['DOGE',  'SHIB'],   // ~0.89 — meme coins
+      ['DOT',   'KSM'],    // ~0.92 — Polkadot ecosystem
+      ['UNI',   'SUSHI'],  // ~0.86 — DEX tokens
+    ],
+    ENTRY_ZSCORE:       1.5,   // enter at 1.5 std deviations
+    EXIT_ZSCORE:        0.3,   // exit when converged back near mean
+    STOP_ZSCORE:        3.5,   // stop loss — divergence extreme
+    MAX_HOLD_HOURS:     72,    // force exit after 3 days
+    MIN_DIVERGENCE:     0.008, // 0.8% min divergence to cover fees
+    LOOKBACK_TICKS:     2880,  // 24h of history at 30s intervals
+    MIN_HISTORY_TICKS:  120,   // need 1h of history before trading
+    STATUS_INTERVAL_MS: 1800000, // Discord pairs status every 30 minutes
+  },
 
   // ── Binance endpoints ─────────────────────────────────────────────────────
   BINANCE_REST_FUTURES: 'fapi.binance.com',
