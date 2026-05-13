@@ -81,6 +81,19 @@ async function boot() {
   // Pairs trading — 30-minute Discord status update
   setInterval(sendPairsStatus, config.PAIRS_CONFIG.STATUS_INTERVAL_MS);
   logger.info('BOT', `📐 Pairs trading active — monitoring ${config.PAIRS_CONFIG.relationships.length} relationships`);
+
+  // Seed pairs engine with current prices so startup snapshot is meaningful
+  logger.info('BOT', 'Seeding pairs engine with current prices...');
+  const allPairsCoins = config.PAIRS_CONFIG.relationships.flatMap(r => r);
+  await Promise.all(allPairsCoins.map(async (coin) => {
+    try {
+      const spot = await sourcer.getSpotPrice(coin);
+      if (spot) pairs.onPrice(coin, spot.price);
+    } catch (_) {}
+  }));
+
+  // Send pairs snapshot immediately — no waiting 30 minutes
+  await sendPairsStatus();
 }
 
 // ─── Real-time tick handler (called by WebSocket monitor) ────────────────────
