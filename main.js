@@ -533,23 +533,36 @@ async function closePairsPosition(position, reason, currentZScore) {
 }
 
 // ─── 30-minute pairs status update ───────────────────────────────────────────
+let pairsReadyAlertSent = false;
+
 async function sendPairsStatus() {
   const snapshot  = pairs.getStatusSnapshot();
   const positions = state.get('positions').filter(p => p.type === 'pairs');
   const balance   = state.get('balance');
+  const minTicks  = config.PAIRS_CONFIG.MIN_HISTORY_TICKS;
+
+  const warmingUp = snapshot.filter(r => r.ticks < minTicks);
+  const ready     = snapshot.filter(r => r.ticks >= minTicks);
+  const allReady  = warmingUp.length === 0;
 
   const lines = [
     '```',
     `📐 PAIRS STATUS  |  ${new Date().toUTCString()}`,
     `Balance: $${balance.toFixed(2)}  |  Open pairs: ${positions.length}`,
+    allReady
+      ? `Warmup: ✅ all ${snapshot.length} pairs ready`
+      : `Warmup: ${ready.length}/${snapshot.length} ready — ${warmingUp.length} still collecting history`,
     '',
-    `${'Pair'.padEnd(12)} ${'Z-Score'.padEnd(10)} ${'Diverge'.padEnd(10)} ${'Signal'}`,
-    '─'.repeat(52),
+    `${'Pair'.padEnd(12)} ${'Ticks'.padEnd(8)} ${'Z-Score'.padEnd(10)} ${'Diverge'.padEnd(10)} ${'Signal'}`,
+    '─'.repeat(60),
   ];
 
   for (const row of snapshot) {
+    const progress = row.ticks < minTicks
+      ? `${row.ticks}/${minTicks}`
+      : '✅';
     lines.push(
-      `${row.pair.padEnd(12)} ${row.zScore.toString().padEnd(10)} ${row.diverge.padEnd(10)} ${row.signal}`
+      `${row.pair.padEnd(12)} ${progress.padEnd(8)} ${row.zScore.toString().padEnd(10)} ${row.diverge.padEnd(10)} ${row.signal}`
     );
   }
 
@@ -557,14 +570,28 @@ async function sendPairsStatus() {
     lines.push('');
     lines.push('OPEN PAIRS POSITIONS:');
     for (const pos of positions) {
-      const pnl     = pairs.unrealizedPnl(pos);
-      const ageHrs  = ((Date.now() - pos.openedAt) / 3600000).toFixed(1);
+      const pnl    = pairs.unrealizedPnl(pos);
+      const ageHrs = ((Date.now() - pos.openedAt) / 3600000).toFixed(1);
       lines.push(`  ${pos.shortCoin}↓/${pos.longCoin}↑  z-entry:${pos.entryZScore.toFixed(2)}  PnL:$${pnl.toFixed(2)}  age:${ageHrs}h`);
     }
   }
 
   lines.push('```');
   await discord.send(lines.join('\n'));
+
+  // Fire a one-time "all pairs ready" alert the first time warmup completes
+  if (allReady && !pairsReadyAlertSent) {
+    pairsReadyAlertSent = true;
+    await discord.send([
+      '```diff',
+      '+ PAIRS ENGINE READY — all pairs have enough history',
+      `  ${snapshot.length} relationships now active and scanning every second`,
+      `  Entry threshold : z-score ≥ ${config.PAIRS_CONFIG.ENTRY_ZSCORE}`,
+      `  Min divergence  : ${(config.PAIRS_CONFIG.MIN_DIVERGENCE * 100).toFixed(1)}%`,
+      '  Bot will enter trades automatically when signals fire',
+      '```'
+    ].join('\n'));
+  }
 }
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
