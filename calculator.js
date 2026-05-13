@@ -2,45 +2,21 @@
 
 /**
  * calculator.js
- * All financial math lives here
+ * Financial math for pairs trading
  */
 
-// Percent spread between perp and spot
-function spread(perpPrice, spotPrice) {
-  return (perpPrice - spotPrice) / spotPrice;
+// Total fee cost for opening + closing a pairs position (both legs, taker)
+function roundTripFee(amount, takerFee) {
+  // Two legs (short + long), each opened and closed = 4 fills
+  return amount * 2 * takerFee * 2;
 }
 
-// Estimated profit over a period
-// amount      = total capital deployed (USD)
-// fundingRate = 1h rate (decimal)
-// tradingFee  = taker/maker fee (decimal, per side)
-// spreadVal   = decimal spread (perp - spot) / spot
-// leverage    = futures leverage
-function profit(amount, fundingRate, tradingFee, spreadVal, leverage) {
-  // Capital split: spot gets most, futures uses leverage
-  const workingAmount = amount * (leverage / (leverage + 1));
-  const tradedAmount  = amount * 2;          // both legs combined
-
-  const fundingIncome = workingAmount * fundingRate;
-  const feeCost       = tradedAmount  * tradingFee * 2; // open + close
-  const spreadCost    = tradedAmount  * spreadVal;       // entry slippage
-
-  return fundingIncome - feeCost - spreadCost;
+// Expected net PnL given price convergence back to mean
+// divergence = (currentRatio - mean) / mean  (decimal)
+// amount     = total capital (split equally across legs)
+function expectedPnl(divergence, amount, takerFee) {
+  const grossProfit = divergence * (amount / 2);
+  return grossProfit - roundTripFee(amount, takerFee);
 }
 
-// Annualized effective return as % of capital
-function effectiveRate(profitValue, amount) {
-  return (profitValue / amount) * 100;
-}
-
-// Hours to annualize
-function annualize(hourlyRate) {
-  return hourlyRate * 24 * 365;
-}
-
-// Mark drawdown % from entry
-function drawdownPct(entryPrice, currentPrice) {
-  return ((entryPrice - currentPrice) / entryPrice) * 100;
-}
-
-module.exports = { spread, profit, effectiveRate, annualize, drawdownPct };
+module.exports = { roundTripFee, expectedPnl };

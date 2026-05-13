@@ -2,68 +2,71 @@
 
 /**
  * monitor.js
- * WebSocket streams for real-time price + funding rate updates
- * Uses Binance combined stream for perp mark price (includes funding rate)
- * Falls back to REST polling if WS drops
+ * Streams real-time spot prices for every coin in the pairs engine.
+ * Uses Binance spot combined stream (miniTicker) — one connection, all coins.
+ * Falls back to REST polling every 30s if the WS drops.
+ *
+ * On every price tick:
+ *   1. Updates pairs engine via pairs.onPrice()
+ *   2. Calls onTickCallback(coin, price) so main.js can scan for signals
  */
 
-const net    = require('net');
 const tls    = require('tls');
 const config = require('./config');
 const logger = require('./logger');
-const calculator = require('./calculator');
+const pairs  = require('./pairs');
 
-let wsSocket    = null;
-let tickHandler = null;
+let wsSocket       = null;
+let tickHandler    = null;
 let reconnectTimer = null;
-let stopped     = false;
+let pollTimer      = null;
+let stopped        = false;
 
-// Latest snapshot per pair { perpPrice, spotPrice, fundingRate }
-const snapshot = {};
-
-// ─── Start monitoring ─────────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 function start(onTickCallback) {
   tickHandler = onTickCallback;
   stopped     = false;
   connectWS();
-
-  // Fallback REST poll every 30s for pairs not covered by WS
-  setInterval(restFallbackPoll, 30000);
+  pollTimer = setInterval(restPoll, config.REST_POLL_INTERVAL_MS);
 }
 
 function stop() {
   stopped = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (wsSocket) { try { wsSocket.destroy(); } catch (_) {} }
-  logger.info('MONITOR', 'WebSocket monitor stopped');
+  if (pollTimer)      clearInterval(pollTimer);
+  if (wsSocket)       { try { wsSocket.destroy(); } catch (_) {} }
+  logger.info('MONITOR', 'Stopped');
 }
 
-// ─── WebSocket connection ─────────────────────────────────────────────────────
+// ─── WebSocket — Binance spot combined miniTicker stream ──────────────────────
+// miniTicker gives: symbol, close price (c), 24h volume, etc. at ~1s intervals
 function connectWS() {
   if (stopped) return;
 
-  // Subscribe to markPrice stream for all pairs (includes fundingRate, every 1s/3s)
-  const streams = config.PAIRS.map(p => `${p.toLowerCase()}usdt@markPrice@1s`).join('/');
-  const path    = `/stream?streams=${streams}`;
+  const streams = config.PAIRS
+    .map(p => `${p.toLowerCase()}usdt@miniTicker`)
+    .join('/');
 
-  logger.info('MONITOR', `Connecting to Binance WS: ${config.BINANCE_WS_FUTURES}${path}`);
+  const host = config.BINANCE_WS_SPOT;
+  const path = `/stream?streams=${streams}`;
 
-  wsSocket = tls.connect(443, config.BINANCE_WS_FUTURES, { servername: config.BINANCE_WS_FUTURES }, () => {
-    // Send HTTP Upgrade request
+  logger.info('MONITOR', `Connecting to Binance spot WS (${config.PAIRS.length} coins)`);
+
+  wsSocket = tls.connect(443, host, { servername: host }, () => {
+    const key = Buffer.from(Math.random().toString()).toString('base64');
     const handshake = [
       `GET ${path} HTTP/1.1`,
-      `Host: ${config.BINANCE_WS_FUTURES}`,
+      `Host: ${host}`,
       'Upgrade: websocket',
       'Connection: Upgrade',
-      `Sec-WebSocket-Key: ${Buffer.from(Math.random().toString()).toString('base64')}`,
+      `Sec-WebSocket-Key: ${key}`,
       'Sec-WebSocket-Version: 13',
-      '\r\n'
+      '\r\n',
     ].join('\r\n');
-
     wsSocket.write(handshake);
   });
 
-  let buffer = Buffer.alloc(0);
+  let buffer   = Buffer.alloc(0);
   let upgraded = false;
 
   wsSocket.on('data', (chunk) => {
@@ -80,25 +83,18 @@ function connectWS() {
       }
       upgraded = true;
       buffer = buffer.slice(headerEnd + 4);
-      logger.info('MONITOR', '✅ WebSocket connected to Binance');
+      logger.info('MONITOR', '✅ WebSocket connected — streaming spot prices');
     }
 
-    // Parse WebSocket frames
     while (buffer.length > 2) {
       const frame = parseWSFrame(buffer);
       if (!frame) break;
       buffer = buffer.slice(frame.consumed);
-      if (frame.opcode === 0x8) { // close
-        logger.warn('MONITOR', 'Server sent close frame');
-        scheduleReconnect();
-        return;
-      }
-      if (frame.opcode === 0x9) { // ping → pong
-        wsSocket.write(buildWSFrame(0xA, frame.payload));
-        continue;
-      }
-      if (frame.opcode === 0x1 || frame.opcode === 0x2) { // text/binary
-        handleStreamMessage(frame.payload.toString());
+
+      if (frame.opcode === 0x8) { scheduleReconnect(); return; }
+      if (frame.opcode === 0x9) { wsSocket.write(buildWSFrame(0xA, frame.payload)); continue; }
+      if (frame.opcode === 0x1 || frame.opcode === 0x2) {
+        handleMessage(frame.payload.toString());
       }
     }
   });
@@ -110,7 +106,7 @@ function connectWS() {
 
   wsSocket.on('close', () => {
     if (!stopped) {
-      logger.warn('MONITOR', 'WS connection closed — scheduling reconnect');
+      logger.warn('MONITOR', 'WS closed — reconnecting');
       scheduleReconnect();
     }
   });
@@ -125,75 +121,49 @@ function scheduleReconnect() {
   }, config.WS_RECONNECT_MS);
 }
 
-// ─── Parse incoming stream message ────────────────────────────────────────────
-function handleStreamMessage(raw) {
+// ─── Handle incoming miniTicker message ──────────────────────────────────────
+function handleMessage(raw) {
   try {
     const msg  = JSON.parse(raw);
     const data = msg.data || msg;
 
-    // markPrice stream data shape: { e, E, s, p (mark price), r (funding rate), T }
-    if (!data.s || data.p === undefined) return;
+    // miniTicker shape: { e: '24hrMiniTicker', s: 'BTCUSDT', c: '67000.00', ... }
+    if (!data.s || !data.c) return;
 
-    const symbol = data.s;  // e.g. BTCUSDT
-    const pair   = symbol.replace('USDT', '');
-    const perpPrice  = parseFloat(data.p);
-    const fundingRate = parseFloat(data.r || 0) / 8; // 8h → 1h
+    const symbol = data.s;
+    if (!symbol.endsWith('USDT')) return;
 
-    if (!snapshot[pair]) snapshot[pair] = {};
-    snapshot[pair].perpPrice   = perpPrice;
-    snapshot[pair].fundingRate = fundingRate;
-    snapshot[pair].lastWS      = Date.now();
+    const coin  = symbol.replace('USDT', '');
+    const price = parseFloat(data.c);
+    if (!coin || isNaN(price) || price <= 0) return;
 
-    // Only emit tick if we also have a spot price
-    if (snapshot[pair].spotPrice) {
-      emitTick(pair);
-    }
-  } catch (err) {
-    // silently ignore malformed frames
+    // Feed into pairs engine
+    pairs.onPrice(coin, price);
+
+    // Notify main
+    if (tickHandler) tickHandler(coin, price);
+
+  } catch (_) {
+    // silently drop malformed frames
   }
 }
 
-// ─── REST fallback to fill in spot prices ─────────────────────────────────────
-async function restFallbackPoll() {
+// ─── REST fallback — ensures prices stay fresh if WS lags ────────────────────
+async function restPoll() {
   const sourcer = require('./sourcer');
-  const pairs   = require('./pairs');
-
-  // Build combined list: funding pairs + pairs trading coins
-  const allCoins = new Set([
-    ...config.PAIRS,
-    ...config.PAIRS_CONFIG.relationships.flatMap(r => r),
-  ]);
-
-  for (const pair of allCoins) {
+  for (const coin of config.PAIRS) {
     try {
-      const spot = await sourcer.getSpotPrice(pair);
+      const spot = await sourcer.getSpotPrice(coin);
       if (!spot) continue;
-
-      // Update snapshot for funding rate positions
-      if (!snapshot[pair]) snapshot[pair] = {};
-      snapshot[pair].spotPrice = spot.price;
-      if (snapshot[pair].perpPrice) emitTick(pair);
-
-      // Feed spot price into pairs engine
-      pairs.onPrice(pair, spot.price);
+      pairs.onPrice(coin, spot.price);
+      if (tickHandler) tickHandler(coin, spot.price);
     } catch (_) {}
   }
-}
-
-// ─── Emit tick to main ────────────────────────────────────────────────────────
-function emitTick(pair) {
-  if (!tickHandler) return;
-  const s = snapshot[pair];
-  if (!s.perpPrice || !s.spotPrice) return;
-
-  const spread = calculator.spread(s.perpPrice, s.spotPrice);
-  tickHandler({ pair, perpPrice: s.perpPrice, spotPrice: s.spotPrice, fundingRate: s.fundingRate || 0, spread });
 }
 
 // ─── WebSocket frame parser ───────────────────────────────────────────────────
 function parseWSFrame(buf) {
   if (buf.length < 2) return null;
-  const fin    = (buf[0] & 0x80) !== 0;
   const opcode = buf[0] & 0x0f;
   const masked = (buf[1] & 0x80) !== 0;
   let len      = buf[1] & 0x7f;
@@ -201,13 +171,10 @@ function parseWSFrame(buf) {
 
   if (len === 126) {
     if (buf.length < 4) return null;
-    len = buf.readUInt16BE(2);
-    offset = 4;
+    len = buf.readUInt16BE(2); offset = 4;
   } else if (len === 127) {
     if (buf.length < 10) return null;
-    // Avoid BigInt — messages won't be >4GB, read only low 32 bits
-    len = buf.readUInt32BE(6);
-    offset = 10;
+    len = buf.readUInt32BE(6); offset = 10;
   }
 
   if (masked) offset += 4;
@@ -229,4 +196,4 @@ function buildWSFrame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([header, payload]);
 }
 
-module.exports = { start, stop, snapshot };
+module.exports = { start, stop };
